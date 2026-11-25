@@ -2,21 +2,45 @@
 //
 // POR QUE EXISTE:
 //
-//	Hoje o main.go cria o mux e registra /health direto. Na Etapa 4 passamos
-//	a ter várias rotas (/login, /callback, /api/...). Em vez de o main.go
-//	crescer sem controle, este pacote é o ÚNICO lugar que sabe "qual URL vai
-//	para qual handler". Aparece agora (e não antes) porque só agora existe
-//	mais de uma rota.
+//	Este pacote é o ÚNICO lugar que sabe "qual URL vai para qual handler".
+//	Em vez de o main.go crescer a cada rota nova, ele monta os handlers e
+//	entrega aqui.
 //
-// O QUE VAI AQUI (a implementar):
-//   - func New(deps) http.Handler: cria o http.ServeMux, registra as rotas
-//     no formato do Go 1.22+ ("GET /login", "GET /api/now-playing"...),
-//     envolve o mux com os middlewares (CORS) e devolve o resultado.
-//   - "deps" é uma struct com o que os handlers precisam (config, services).
-//     Isso se chama injeção de dependências: nada de variável global.
-//   - Mover o healthHandler que hoje está no main.go (para handlers/ ou
-//     aqui — você decide).
-//   - Esta API NÃO serve front-end: não existe rota "GET /".
-//
-// Rotas previstas: ver tabela na seção 6 do README.
+// ESCOPO: só as rotas da tabela da seção 6 do README. Esta API NÃO serve
+// front-end (não existe "GET /") e as rotas /api/* não têm autenticação
+// própria (por isso o README manda não expor o servidor publicamente).
 package server
+
+import (
+	"net/http"
+
+	"github.com/jorgelzz/sgotify/internal/handlers"
+)
+
+// Routes reúne os handlers que o servidor precisa para atender cada rota.
+// É injeção de dependências: nada de variável global; main.go monta e entrega.
+type Routes struct {
+	Auth       *handlers.AuthHandler
+	NowPlaying http.Handler
+	TopWeek    http.Handler
+	Calendar   http.Handler
+}
+
+// New registra as rotas e devolve o http.Handler pronto para o http.Server.
+//
+// A sintaxe "GET /caminho" (Go 1.22+) já restringe o método: outro método na
+// mesma URL recebe 405 automaticamente, e URL desconhecida recebe 404.
+func New(routes Routes, corsOrigin string) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /health", handlers.Health)
+	mux.HandleFunc("GET /login", routes.Auth.Login)
+	mux.HandleFunc("GET /callback", routes.Auth.Callback)
+	mux.Handle("GET /api/now-playing", routes.NowPlaying)
+	mux.Handle("GET /api/top-week", routes.TopWeek)
+	mux.Handle("GET /api/calendar", routes.Calendar)
+
+	// Ordem das camadas, de fora para dentro: Logger -> CORS -> mux.
+	// O Logger fica por fora para registrar TAMBÉM os preflights (OPTIONS).
+	return Logger(CORS(corsOrigin)(mux))
+}

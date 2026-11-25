@@ -8,15 +8,70 @@
 //	num middleware — uma função que recebe um http.Handler e devolve outro
 //	http.Handler "envolvendo" o original.
 //
-// O QUE VAI AQUI (a implementar):
-//   - func CORS(allowedOrigin string) func(http.Handler) http.Handler
-//     1. define Access-Control-Allow-Origin = allowedOrigin (nunca "*" por padrão);
-//     2. define Allow-Methods (GET, OPTIONS) e Allow-Headers (Content-Type);
-//     3. se o método for OPTIONS (preflight), responde 204 e NÃO chama o
-//     handler seguinte.
-//   - (opcional) func Logger(next http.Handler) http.Handler: loga método,
-//     caminho, status e duração. Ótimo para enxergar o que o front está chamando.
-//
 // CONCEITO PARA ENTENDER: o padrão func(http.Handler) http.Handler é a base
 // de todos os middlewares em Go.
 package server
+
+import (
+	"log"
+	"net/http"
+	"time"
+)
+
+// CORS libera a origem do front-end (e SÓ ela) a ler as respostas.
+//
+//  1. Access-Control-Allow-Origin = allowedOrigin, a origem configurada
+//     (CORS_ALLOWED_ORIGIN). Nunca "*": com "*", qualquer site aberto no
+//     browser do usuário poderia ler /api/now-playing.
+//  2. "Vary: Origin" avisa caches de que a resposta depende da origem.
+//  3. Preflight: antes de certas requisições o browser pergunta "posso?" com um
+//     OPTIONS. Respondemos 204 (sem corpo) e NÃO chamamos o handler seguinte.
+//
+// O CORS envolve o mux inteiro, e não cada rota: o mux só registra GET, e um
+// OPTIONS cairia em "405 Method Not Allowed" antes de chegar a qualquer
+// handler.
+func CORS(allowedOrigin string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", allowedOrigin)
+			h.Add("Vary", "Origin")
+
+			if r.Method == http.MethodOptions {
+				h.Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+				h.Set("Access-Control-Allow-Headers", "Content-Type")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// statusRecorder embrulha o ResponseWriter para o Logger descobrir o status
+// que o handler escolheu (o ResponseWriter normal não permite ler de volta).
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+// WriteHeader guarda o status e repassa ao ResponseWriter de verdade.
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// Logger registra uma linha por requisição: método, caminho, status e duração.
+// Ótimo para ver o que o front está chamando.
+//
+// Loga só r.URL.Path, NUNCA a query: em /callback ela contém o "code" e o
+// "state" do login, que não devem ficar em log.
+func Logger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		// Se o handler não chamar WriteHeader, o Go responde 200 por padrão.
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		log.Printf("%s %s -> %d (%s)", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
+	})
+}

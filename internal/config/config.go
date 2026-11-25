@@ -8,10 +8,12 @@
 //	uma struct. Por isso vem logo no início: é a única coisa da qual os outros
 //	pacotes dependem e que não depende de nada.
 //
-// O QUE VAI AQUI (a implementar):
+// O QUE FAZ:
 //   - struct Config com: ClientID, RedirectURI, Port, FrontendURL,
 //     CORSAllowedOrigin, Timezone (*time.Location), CollectInterval
-//     (time.Duration), DataDir.
+//     (time.Duration), DBURL (variável DB_URL: obrigatória, como o Client ID;
+//     substitui o antigo DataDir, já que token e histórico agora ficam no
+//     PostgreSQL e não em arquivos).
 //   - func Load() (Config, error): lê o arquivo .env (se existir) e as
 //     variáveis de ambiente; devolve erro claro se faltar SPOTIFY_CLIENT_ID.
 //
@@ -41,7 +43,9 @@ type Config struct {
 	CORSAllowedOrigin string
 	Timezone          *time.Location
 	CollectInterval   time.Duration
-	DataDir           string
+	// DBURL é a string de conexão do PostgreSQL (variável DB_URL). Guarda o
+	// token do Spotify e o histórico de plays. Substituiu o antigo DataDir.
+	DBURL string
 }
 
 func loadDotEnv(path string) error {
@@ -94,11 +98,16 @@ func Load() (Config, error) {
 		Port:              getEnv("PORT", "8080"),
 		FrontendURL:       getEnv("FRONTEND_URL", "http://localhost:3000"),
 		CORSAllowedOrigin: getEnv("CORS_ALLOWED_ORIGIN", "http://localhost:3000"),
-		DataDir:           getEnv("DATA_DIR", "data"),
+		DBURL:             getEnv("DB_URL", ""),
 	}
 
 	if cfg.ClientID == "" {
 		return Config{}, errors.New("SPOTIFY_CLIENT_ID is required")
+	}
+	// Sem banco não há onde guardar o token nem o histórico: falhar já na
+	// inicialização, com mensagem clara, é melhor que cair no meio do login.
+	if cfg.DBURL == "" {
+		return Config{}, errors.New("DB_URL is required (see .env.example)")
 	}
 
 	// O .env só tem texto: "20" vira 20 minutos (time.Duration).

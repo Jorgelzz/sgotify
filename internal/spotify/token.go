@@ -4,24 +4,37 @@
 //
 //	O access token dura ~1h, mas o coletor precisa funcionar por dias sem eu
 //	fazer login de novo. Então o token (principalmente o refresh_token)
-//	precisa SOBREVIVER a reinícios do servidor => persistir em disco.
+//	precisa SOBREVIVER a reinícios do servidor => persistir no PostgreSQL.
 //	Separado do auth.go porque "como obter token" (rede) e "onde guardar
-//	token" (disco) são responsabilidades diferentes.
+//	token" (banco) são responsabilidades diferentes.
 //
 // O QUE VAI AQUI:
-//   - Token, newToken e Expired  -> Etapa 3 (agora)
-//   - Save / Load em disco       -> Etapa 4 (quando o handler precisar)
+//   - Token, newToken e Expired      -> Etapa 3 (pronto)
+//   - ErrNoToken e interface TokenStore -> Etapa 4a (só a DECLARAÇÃO; a
+//     implementação com SQL fica em storage/tokenstore.go)
 //
-// CUIDADO: acesso concorrente (handler + coletor) => proteger com sync.Mutex
-// quando chegar na Etapa 5.
+// POR QUE A INTERFACE FICA AQUI e não no pacote storage:
+//
+//	storage/tokenstore.go precisa do tipo spotify.Token, então storage IMPORTA
+//	spotify. Se spotify importasse storage de volta, o Go recusaria (import
+//	cycle). Declarando a interface do lado de quem a CONSOME (spotify), o
+//	spotify não conhece o banco: quem liga os dois é o main.go.
+//
+// CUIDADO: acesso concorrente (handler + coletor) => o client.go (Etapa 5)
+// precisa de um sync.Mutex para não renovar o token duas vezes ao mesmo
+// tempo. O banco resolve a gravação concorrente, mas não a renovação dupla.
 package spotify
 
-import "time"
+import (
+	"context"
+	"errors"
+	"time"
+)
 
 // Token é o par de credenciais do usuário.
 //
-// As tags `json:"..."` definem o nome de cada campo quando a struct for
-// convertida para JSON (ao salvar em disco, na Etapa 4).
+// As tags `json:"..."` ficam por conveniência (logs, testes). No Postgres cada
+// campo vira uma COLUNA da tabela spotify_tokens, e não um JSON.
 //
 // ExpiresAt é um HORÁRIO ABSOLUTO, não uma duração. O Spotify manda
 // "expires_in: 3600" (segundos a partir de agora); se guardássemos só isso,
@@ -63,9 +76,28 @@ func (t Token) Expired() bool {
 	return time.Now().Add(30 * time.Second).After(t.ExpiresAt)
 }
 
-// Etapa 4 (NÃO escreva agora): Save(path string, t Token) error e
-// Load(path string) (Token, error) em data/token.json.
-//   - Save: json.MarshalIndent + os.WriteFile com permissão 0o600 (credencial).
-//     Crie a pasta antes com os.MkdirAll(filepath.Dir(path), 0o700).
-//   - Load: se o arquivo não existir, devolva um erro que o chamador consiga
-//     identificar (errors.Is(err, os.ErrNotExist)) => "usuário ainda não fez login".
+// ErrNoToken diz que ainda não há token guardado (o usuário nunca fez login).
+//
+// Quem implementa TokenStore devolve ESTE erro quando a tabela está vazia, e o
+// chamador o reconhece com errors.Is(err, ErrNoToken): o handler responde 401
+// apontando para /login. É o substituto do antigo "arquivo não existe".
+// Distingue "nunca logou" (esperado) de "o banco caiu" (erro de verdade).
+var ErrNoToken = errors.New("no spotify token stored")
+
+// TokenStore é o que o pacote spotify precisa de um lugar para guardar o token.
+// Só o contrato; a implementação com SQL está em storage/tokenstore.go.
+//
+//   - Save: grava o token, SUBSTITUINDO o anterior (só existe um usuário, logo
+//     só existe uma linha).
+//   - Load: devolve o token guardado, ou ErrNoToken se não houver nenhum.
+//     Em qualquer outro erro, devolva Token{} e o erro embrulhado com %w.
+//
+// Usada por: handlers/auth.go (Save no /callback) e spotify/client.go (Load
+// antes de cada chamada; Save depois de renovar com Auth.Refresh).
+//
+// Os testes do client.go (Etapa 5) usam um TokenStore FALSO em memória: não
+// precisam de banco.
+type TokenStore interface {
+	Save(ctx context.Context, t Token) error
+	Load(ctx context.Context) (Token, error)
+}

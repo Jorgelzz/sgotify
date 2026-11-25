@@ -10,7 +10,15 @@ import (
 // keys são todas as variáveis que o Load lê.
 var keys = []string{
 	"SPOTIFY_CLIENT_ID", "SPOTIFY_REDIRECT_URI", "PORT", "FRONTEND_URL",
-	"CORS_ALLOWED_ORIGIN", "TIMEZONE", "COLLECT_INTERVAL_MINUTES", "DATA_DIR",
+	"CORS_ALLOWED_ORIGIN", "TIMEZONE", "COLLECT_INTERVAL_MINUTES", "DB_URL",
+}
+
+// validEnv define as duas variáveis OBRIGATÓRIAS (Client ID e DB_URL), para os
+// testes que não estão testando a obrigatoriedade delas.
+func validEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("SPOTIFY_CLIENT_ID", "abc")
+	t.Setenv("DB_URL", "postgres://user:pass@localhost:5432/db?sslmode=disable")
 }
 
 // isolate deixa o teste independente da sua máquina:
@@ -27,7 +35,7 @@ func isolate(t *testing.T) {
 
 func TestLoadDefaults(t *testing.T) {
 	isolate(t)
-	t.Setenv("SPOTIFY_CLIENT_ID", "abc")
+	validEnv(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -52,6 +60,15 @@ func TestLoadMissingClientID(t *testing.T) {
 	}
 }
 
+func TestLoadMissingDBURL(t *testing.T) {
+	isolate(t)
+	t.Setenv("SPOTIFY_CLIENT_ID", "abc") // só o DB_URL fica faltando
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when DB_URL is missing")
+	}
+}
+
 func TestLoadCollectInterval(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -67,7 +84,7 @@ func TestLoadCollectInterval(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			isolate(t)
-			t.Setenv("SPOTIFY_CLIENT_ID", "abc")
+			validEnv(t)
 			t.Setenv("COLLECT_INTERVAL_MINUTES", tt.value)
 
 			cfg, err := Load()
@@ -83,7 +100,7 @@ func TestLoadCollectInterval(t *testing.T) {
 
 func TestLoadInvalidTimezone(t *testing.T) {
 	isolate(t)
-	t.Setenv("SPOTIFY_CLIENT_ID", "abc")
+	validEnv(t)
 	t.Setenv("TIMEZONE", "Mars/Olympus_Mons")
 
 	if _, err := Load(); err == nil {
@@ -98,16 +115,16 @@ func TestDotEnv(t *testing.T) {
 	// t.Setenv restaura o estado original.
 	os.Unsetenv("SPOTIFY_CLIENT_ID")
 	os.Unsetenv("PORT")
-	os.Unsetenv("DATA_DIR")
+	os.Unsetenv("DB_URL")
 	t.Setenv("PORT", "2222") // variável real: deve ganhar do .env
 
-	content := "# comentário\n\nSPOTIFY_CLIENT_ID = fromfile\nPORT=1111\nDATA_DIR=meus-dados\n"
+	content := "# comentário\n\nSPOTIFY_CLIENT_ID = fromfile\nPORT=1111\nDB_URL=postgres://file@localhost/db\n"
 	if err := os.WriteFile(filepath.Join(".", ".env"), []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		os.Unsetenv("SPOTIFY_CLIENT_ID")
-		os.Unsetenv("DATA_DIR")
+		os.Unsetenv("DB_URL")
 	})
 
 	cfg, err := Load()
@@ -117,8 +134,8 @@ func TestDotEnv(t *testing.T) {
 	if cfg.ClientID != "fromfile" {
 		t.Errorf("ClientID = %q, want fromfile (read from .env, spaces trimmed)", cfg.ClientID)
 	}
-	if cfg.DataDir != "meus-dados" {
-		t.Errorf("DataDir = %q, want meus-dados", cfg.DataDir)
+	if cfg.DBURL != "postgres://file@localhost/db" {
+		t.Errorf("DBURL = %q, want the value from .env", cfg.DBURL)
 	}
 	if cfg.Port != "2222" {
 		t.Errorf("Port = %q, want 2222 (real env var must beat .env)", cfg.Port)
@@ -127,7 +144,7 @@ func TestDotEnv(t *testing.T) {
 
 func TestLoadWithoutDotEnvFile(t *testing.T) {
 	isolate(t)
-	t.Setenv("SPOTIFY_CLIENT_ID", "abc")
+	validEnv(t)
 
 	// isolate já entrou numa pasta sem .env: não pode dar erro.
 	if _, err := Load(); err != nil {
