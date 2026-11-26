@@ -41,19 +41,19 @@ func TestNewToken(t *testing.T) {
 	// time.Now() muda a cada chamada, então comparar ExpiresAt com "==" nunca
 	// bate. Marcamos o relógio antes e depois e exigimos cair no intervalo.
 	before := time.Now()
-	tok := newToken("access", "refresh", 3600)
+	token := newToken("access", "refresh", 3600)
 	after := time.Now()
 
-	if tok.AccessToken != "access" {
-		t.Errorf("AccessToken = %q, want access", tok.AccessToken)
+	if token.AccessToken != "access" {
+		t.Errorf("AccessToken = %q, want access", token.AccessToken)
 	}
-	if tok.RefreshToken != "refresh" {
-		t.Errorf("RefreshToken = %q, want refresh", tok.RefreshToken)
+	if token.RefreshToken != "refresh" {
+		t.Errorf("RefreshToken = %q, want refresh", token.RefreshToken)
 	}
 
 	earliest := before.Add(time.Hour)
 	latest := after.Add(time.Hour)
-	if tok.ExpiresAt.Before(earliest) || tok.ExpiresAt.After(latest) {
-		t.Errorf("ExpiresAt = %v, want between %v and %v", tok.ExpiresAt, earliest, latest)
+	if token.ExpiresAt.Before(earliest) || token.ExpiresAt.After(latest) {
+		t.Errorf("ExpiresAt = %v, want between %v and %v", token.ExpiresAt, earliest, latest)
 	}
 }
