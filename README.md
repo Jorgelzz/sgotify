@@ -1,4 +1,4 @@
-# sgotify
+# sgotify - SISTEMA PARA ESTUDOS
 
 **API backend em Go** que conversa com o Spotify e expõe rotas JSON para um front-end (que ficará em outro projeto):
 
