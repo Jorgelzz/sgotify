@@ -6,9 +6,13 @@
 //	Em vez de o main.go crescer a cada rota nova, ele monta os handlers e
 //	entrega aqui.
 //
-// ESCOPO: só as rotas da tabela da seção 6 do README. Esta API NÃO serve
-// front-end (não existe "GET /") e as rotas /api/* não têm autenticação
-// própria (por isso o README manda não expor o servidor publicamente).
+// ESCOPO: só as rotas da tabela do guide-structure.md. Esta API NÃO serve
+// front-end (não existe "GET /").
+//
+// AUTENTICAÇÃO: /api/* exige o cookie de sessão (middleware RequireSession).
+// /health, /login e /callback ficam abertos: os dois últimos são como se
+// obtém a sessão. A identidade vem do login do Spotify (só a conta permitida
+// recebe o cookie), e não de senha própria.
 package server
 
 import (
@@ -21,6 +25,7 @@ import (
 // É injeção de dependências: nada de variável global; main.go monta e entrega.
 type Routes struct {
 	Auth       *handlers.AuthHandler
+	Sessions   sessionChecker // decide quem pode chamar /api/*
 	NowPlaying http.Handler
 	TopWeek    http.Handler
 	Calendar   http.Handler
@@ -32,15 +37,20 @@ type Routes struct {
 // mesma URL recebe 405 automaticamente, e URL desconhecida recebe 404.
 func New(routes Routes, corsOrigin string) http.Handler {
 	mux := http.NewServeMux()
+	protect := RequireSession(routes.Sessions)
 
+	// Abertas: saúde e o fluxo de login (é por ele que se ganha a sessão).
 	mux.HandleFunc("GET /health", handlers.Health)
 	mux.HandleFunc("GET /login", routes.Auth.Login)
 	mux.HandleFunc("GET /callback", routes.Auth.Callback)
-	mux.Handle("GET /api/now-playing", routes.NowPlaying)
-	mux.Handle("GET /api/top-week", routes.TopWeek)
-	mux.Handle("GET /api/calendar", routes.Calendar)
 
-	// Ordem das camadas, de fora para dentro: Logger -> CORS -> mux.
+	// Protegidas: só com sessão válida.
+	mux.Handle("GET /api/now-playing", protect(routes.NowPlaying))
+	mux.Handle("GET /api/top-week", protect(routes.TopWeek))
+	mux.Handle("GET /api/calendar", protect(routes.Calendar))
+
+	// Ordem das camadas, de fora para dentro: Logger -> CORS -> mux (-> sessão,
+	// só nas rotas /api/*).
 	// O Logger fica por fora para registrar TAMBÉM os preflights (OPTIONS).
 	return Logger(CORS(corsOrigin)(mux))
 }

@@ -343,6 +343,35 @@ func (m *memTokens) Load(context.Context) (spotify.Token, error) {
 	return *m.saved, nil
 }
 
+// allowedUser é o id da conta permitida usada nos testes de login.
+const allowedUser = "me"
+
+// sessionTestCookie é o nome do cookie que o fakeSessions grava (o handler não
+// sabe o nome real: quem emite é o session.Manager).
+const sessionTestCookie = "test_session"
+
+// fakeIdentity responde "de quem é este token?" sem falar com o Spotify.
+type fakeIdentity struct {
+	id       string
+	err      error
+	calls    int
+	gotToken string
+}
+
+func (f *fakeIdentity) UserID(_ context.Context, accessToken string) (string, error) {
+	f.calls++
+	f.gotToken = accessToken
+	return f.id, f.err
+}
+
+// fakeSessions conta quantas sessões foram emitidas.
+type fakeSessions struct{ issued int }
+
+func (f *fakeSessions) Issue(w http.ResponseWriter) {
+	f.issued++
+	http.SetCookie(w, &http.Cookie{Name: sessionTestCookie, Value: "ok"})
+}
+
 func cookieByName(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == name {
@@ -354,7 +383,7 @@ func cookieByName(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 
 func TestLogin(t *testing.T) {
 	fa := &fakeAuth{}
-	h := NewAuthHandler(fa, &memTokens{}, "http://front")
+	h := NewAuthHandler(fa, &fakeIdentity{id: allowedUser}, &memTokens{}, &fakeSessions{}, allowedUser, "http://front")
 	rec := do(http.HandlerFunc(h.Login), "/login")
 
 	if rec.Code != http.StatusFound {
@@ -390,7 +419,7 @@ func TestLogin(t *testing.T) {
 
 // Cada login gera valores novos.
 func TestLoginRandomEachTime(t *testing.T) {
-	h := NewAuthHandler(&fakeAuth{}, &memTokens{}, "http://front")
+	h := NewAuthHandler(&fakeAuth{}, &fakeIdentity{id: allowedUser}, &memTokens{}, &fakeSessions{}, allowedUser, "http://front")
 	a := cookieByName(do(http.HandlerFunc(h.Login), "/login"), stateCookie)
 	b := cookieByName(do(http.HandlerFunc(h.Login), "/login"), stateCookie)
 	if a.Value == b.Value {
@@ -419,8 +448,10 @@ func loginCookies() []*http.Cookie {
 func TestCallbackSuccess(t *testing.T) {
 	want := spotify.Token{AccessToken: "acc", RefreshToken: "ref", ExpiresAt: time.Now().Add(time.Hour)}
 	fa := &fakeAuth{token: want}
+	fi := &fakeIdentity{id: allowedUser}
 	store := &memTokens{}
-	h := NewAuthHandler(fa, store, "http://front")
+	fs := &fakeSessions{}
+	h := NewAuthHandler(fa, fi, store, fs, allowedUser, "http://front")
 
 	rec := callback(h, "?code=the-code&state=state-123", loginCookies()...)
 
@@ -433,7 +464,16 @@ func TestCallbackSuccess(t *testing.T) {
 	if store.saved == nil || *store.saved != want {
 		t.Errorf("saved = %+v, want %+v", store.saved, want)
 	}
-	// Cookies apagados (MaxAge < 0) depois do uso.
+	// A identidade é perguntada com o access token RECÉM-OBTIDO (ainda não
+	// está no banco).
+	if fi.gotToken != "acc" {
+		t.Errorf("identity checked token %q, want acc", fi.gotToken)
+	}
+	// Conta permitida: o browser ganha UMA sessão.
+	if fs.issued != 1 || cookieByName(rec, sessionTestCookie) == nil {
+		t.Errorf("session issued %d times, cookie=%v; want exactly one session cookie", fs.issued, cookieByName(rec, sessionTestCookie))
+	}
+	// Cookies do login apagados (MaxAge < 0) depois do uso.
 	for _, name := range []string{stateCookie, verifierCookie} {
 		if c := cookieByName(rec, name); c == nil || c.MaxAge >= 0 {
 			t.Errorf("cookie %s not cleared: %+v", name, c)
@@ -442,46 +482,86 @@ func TestCallbackSuccess(t *testing.T) {
 }
 
 func TestCallbackRejections(t *testing.T) {
+	validQuery := "?code=c&state=state-123"
 	tests := []struct {
-		name       string
-		query      string
-		cookies    []*http.Cookie
-		exchange   error
-		saveErr    error
-		wantStatus int
+		name        string
+		query       string
+		cookies     []*http.Cookie
+		exchangeErr error
+		identityID  string // o que o Spotify diz sobre o dono do token
+		identityErr error
+		saveErr     error
+		wantStatus  int
+		// validation: a requisição já deve cair ANTES de trocar o code.
+		beforeExchange bool
+		// beforeIdentity: e ANTES de perguntar a identidade.
+		beforeIdentity bool
 	}{
-		{"user denied", "?error=access_denied&state=state-123", loginCookies(), nil, nil, 400},
-		{"no cookies", "?code=c&state=state-123", nil, nil, nil, 400},
-		{"only state cookie", "?code=c&state=state-123", loginCookies()[:1], nil, nil, 400},
-		{"state mismatch", "?code=c&state=other", loginCookies(), nil, nil, 400},
-		{"missing state", "?code=c", loginCookies(), nil, nil, 400},
-		{"missing code", "?state=state-123", loginCookies(), nil, nil, 400},
-		{"exchange fails", "?code=c&state=state-123", loginCookies(), errors.New("spotify said no"), nil, 502},
-		{"save fails", "?code=c&state=state-123", loginCookies(), nil, errors.New("db down"), 500},
+		{name: "user denied", query: "?error=access_denied&state=state-123", cookies: loginCookies(), identityID: allowedUser, wantStatus: 400, beforeExchange: true, beforeIdentity: true},
+		{name: "no cookies", query: validQuery, identityID: allowedUser, wantStatus: 400, beforeExchange: true, beforeIdentity: true},
+		{name: "only state cookie", query: validQuery, cookies: loginCookies()[:1], identityID: allowedUser, wantStatus: 400, beforeExchange: true, beforeIdentity: true},
+		{name: "state mismatch", query: "?code=c&state=other", cookies: loginCookies(), identityID: allowedUser, wantStatus: 400, beforeExchange: true, beforeIdentity: true},
+		{name: "missing state", query: "?code=c", cookies: loginCookies(), identityID: allowedUser, wantStatus: 400, beforeExchange: true, beforeIdentity: true},
+		{name: "missing code", query: "?state=state-123", cookies: loginCookies(), identityID: allowedUser, wantStatus: 400, beforeExchange: true, beforeIdentity: true},
+		{name: "exchange fails", query: validQuery, cookies: loginCookies(), exchangeErr: errors.New("spotify said no"), identityID: allowedUser, wantStatus: 502, beforeIdentity: true},
+
+		// IDENTIDADE: o login do Spotify deu certo, mas a conta não é a permitida.
+		{name: "other spotify account", query: validQuery, cookies: loginCookies(), identityID: "someone-else", wantStatus: 403},
+		{name: "empty spotify id", query: validQuery, cookies: loginCookies(), identityID: "", wantStatus: 403},
+		{name: "identity lookup fails", query: validQuery, cookies: loginCookies(), identityErr: errors.New("profile boom"), wantStatus: 502},
+
+		{name: "save fails", query: validQuery, cookies: loginCookies(), identityID: allowedUser, saveErr: errors.New("db down"), wantStatus: 500},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fa := &fakeAuth{exchangeErr: tt.exchange}
+			fa := &fakeAuth{exchangeErr: tt.exchangeErr, token: spotify.Token{AccessToken: "acc"}}
+			fi := &fakeIdentity{id: tt.identityID, err: tt.identityErr}
 			store := &memTokens{saveErr: tt.saveErr}
-			h := NewAuthHandler(fa, store, "http://front")
+			fs := &fakeSessions{}
+			h := NewAuthHandler(fa, fi, store, fs, allowedUser, "http://front")
 
 			rec := callback(h, tt.query, tt.cookies...)
 
 			if rec.Code != tt.wantStatus {
 				t.Errorf("status = %d, want %d (%s)", rec.Code, tt.wantStatus, rec.Body.String())
 			}
+			// Login recusado: NENHUM token guardado e NENHUMA sessão emitida.
 			if store.saved != nil {
 				t.Error("a token was saved on a rejected login")
 			}
-			// Antes de validar o state, o code NÃO pode ser trocado por tokens.
-			if strings.HasPrefix(tt.name, "state") || tt.name == "no cookies" || tt.name == "missing state" {
-				if fa.gotCode != "" {
-					t.Error("code was exchanged despite failing validation")
+			if fs.issued != 0 || cookieByName(rec, sessionTestCookie) != nil {
+				t.Error("a session was issued on a rejected login")
+			}
+			if tt.beforeExchange && fa.gotCode != "" {
+				t.Error("code was exchanged despite failing validation")
+			}
+			if tt.beforeIdentity && fi.calls != 0 {
+				t.Error("identity was checked before the login was valid")
+			}
+			for _, secret := range []string{"spotify said no", "db down", "profile boom"} {
+				if strings.Contains(rec.Body.String(), secret) {
+					t.Errorf("internal error leaked: %s", rec.Body.String())
 				}
 			}
-			if strings.Contains(rec.Body.String(), "spotify said no") ||
-				strings.Contains(rec.Body.String(), "db down") {
-				t.Errorf("internal error leaked: %s", rec.Body.String())
+		})
+	}
+}
+
+// Última barreira: mesmo com o id permitido VAZIO (configuração errada), nenhum
+// id passa, nem o vazio. Sem isso, "" == "" liberaria qualquer um.
+func TestCallbackEmptyAllowedUserNeverPasses(t *testing.T) {
+	for _, id := range []string{"", "anyone"} {
+		t.Run("id="+id, func(t *testing.T) {
+			store := &memTokens{}
+			fs := &fakeSessions{}
+			h := NewAuthHandler(&fakeAuth{token: spotify.Token{AccessToken: "acc"}},
+				&fakeIdentity{id: id}, store, fs, "", "http://front")
+
+			rec := callback(h, "?code=c&state=state-123", loginCookies()...)
+
+			if rec.Code != http.StatusForbidden || store.saved != nil || fs.issued != 0 {
+				t.Errorf("status=%d saved=%v sessions=%d; want 403, nothing saved, no session",
+					rec.Code, store.saved, fs.issued)
 			}
 		})
 	}

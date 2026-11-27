@@ -13,8 +13,12 @@
 //	/login:    gera verifier e state, guarda os dois em cookies e redireciona
 //	           o browser para a tela de aprovação do Spotify.
 //	/callback: o Spotify devolve o browser aqui com ?code=...&state=...; conferimos
-//	           o state, trocamos o code por tokens, gravamos e mandamos o
-//	           browser de volta ao front-end.
+//	           o state, trocamos o code por tokens, CONFERIMOS DE QUEM É A
+//	           CONTA (só a permitida passa), gravamos o token, damos ao
+//	           browser o cookie de sessão e o mandamos de volta ao front-end.
+//
+// O login do Spotify é, ao mesmo tempo, a autorização para ler os seus dados
+// e a identidade que libera /api/*: não existe senha própria.
 package handlers
 
 import (
@@ -41,16 +45,39 @@ type authAPI interface {
 	ExchangeCode(ctx context.Context, code, verifier string) (spotify.Token, error)
 }
 
+// identityAPI pergunta ao Spotify "de quem é este access token?"
+// (*spotify.Client satisfaz: é o UserID de spotify/me.go).
+type identityAPI interface {
+	UserID(ctx context.Context, accessToken string) (string, error)
+}
+
+// sessionIssuer grava o cookie de sessão na resposta
+// (*session.Manager satisfaz).
+type sessionIssuer interface {
+	Issue(w http.ResponseWriter)
+}
+
 // AuthHandler reúne os handlers do login.
 type AuthHandler struct {
-	auth        authAPI
-	tokens      spotify.TokenStore
-	frontendURL string // para onde o browser volta depois do login
+	auth          authAPI
+	identity      identityAPI
+	tokens        spotify.TokenStore
+	sessions      sessionIssuer
+	allowedUserID string // a ÚNICA conta Spotify autorizada (ALLOWED_SPOTIFY_USER_ID)
+	frontendURL   string // para onde o browser volta depois do login
 }
 
 // NewAuthHandler cria os handlers com as dependências injetadas.
-func NewAuthHandler(auth authAPI, tokens spotify.TokenStore, frontendURL string) *AuthHandler {
-	return &AuthHandler{auth: auth, tokens: tokens, frontendURL: frontendURL}
+func NewAuthHandler(auth authAPI, identity identityAPI, tokens spotify.TokenStore,
+	sessions sessionIssuer, allowedUserID, frontendURL string) *AuthHandler {
+	return &AuthHandler{
+		auth:          auth,
+		identity:      identity,
+		tokens:        tokens,
+		sessions:      sessions,
+		allowedUserID: allowedUserID,
+		frontendURL:   frontendURL,
+	}
 }
 
 // Login (GET /login) inicia o OAuth.
@@ -129,13 +156,48 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not complete the login with Spotify", http.StatusBadGateway)
 		return
 	}
+
+	// IDENTIDADE: o login do Spotify só prova que ALGUÉM tem uma conta Spotify.
+	// Perguntamos de quem é o token e só seguimos se for a conta permitida.
+	// Isto vem ANTES do Save: uma conta de fora não pode sobrescrever o token
+	// guardado (senão a API passaria a mostrar a conta DELA).
+	id, err := h.identity.UserID(r.Context(), token.AccessToken)
+	if err != nil {
+		log.Printf("checking spotify account: %v", err)
+		http.Error(w, "could not verify the Spotify account", http.StatusBadGateway)
+		return
+	}
+	if !h.isAllowed(id) {
+		// O id vai para o log (e não para a resposta): é assim que você
+		// descobre o seu ALLOWED_SPOTIFY_USER_ID na primeira vez.
+		log.Printf("login rejected: spotify user %q is not the allowed account", id)
+		http.Error(w, "this Spotify account is not allowed", http.StatusForbidden)
+		return
+	}
+
 	if err := h.tokens.Save(r.Context(), token); err != nil {
 		log.Printf("saving token: %v", err)
 		http.Error(w, "could not save the login", http.StatusInternalServerError)
 		return
 	}
 
+	// Conta confirmada e token guardado: o browser ganha o cookie de sessão que
+	// libera /api/*.
+	h.sessions.Issue(w)
 	http.Redirect(w, r, h.frontendURL, http.StatusFound)
+}
+
+// isAllowed diz se id é a conta autorizada.
+//
+// Um id vazio, ou uma configuração com id permitido vazio, NUNCA passa: sem
+// isso, "" == "" liberaria qualquer um. (A config e o spotify.UserID já
+// impedem os dois casos; esta checagem é a última barreira.) A comparação é em
+// tempo constante, como a do state.
+func (h *AuthHandler) isAllowed(id string) bool {
+	if id == "" || h.allowedUserID == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(id), []byte(h.allowedUserID)) == 1
 }
 
 // setLoginCookie grava (ou, com maxAge negativo, APAGA) um cookie do login.

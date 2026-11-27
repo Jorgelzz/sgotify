@@ -8,7 +8,7 @@
 // ORDEM DA MONTAGEM (de baixo para cima nas camadas):
 //
 //	config -> Postgres (Open + Migrate) -> stores -> cliente Spotify ->
-//	services -> handlers -> server; e o coletor numa goroutine ao lado.
+//	services -> sessão -> handlers -> server; e o coletor numa goroutine ao lado.
 //
 // ENCERRAMENTO LIMPO: Ctrl+C (ou SIGTERM) cancela um context; o coletor para,
 // o servidor termina as requisições em andamento e o banco é fechado.
@@ -31,6 +31,7 @@ import (
 	"github.com/jorgelzz/sgotify/internal/handlers"
 	"github.com/jorgelzz/sgotify/internal/server"
 	"github.com/jorgelzz/sgotify/internal/service"
+	"github.com/jorgelzz/sgotify/internal/session"
 	"github.com/jorgelzz/sgotify/internal/spotify"
 	"github.com/jorgelzz/sgotify/internal/storage"
 )
@@ -38,6 +39,11 @@ import (
 // shutdownTimeout é quanto tempo damos às requisições em andamento para
 // terminarem depois do Ctrl+C.
 const shutdownTimeout = 10 * time.Second
+
+// sessionTTL é quanto tempo o login vale no browser. Passado esse prazo, o
+// front recebe 401 e manda o usuário de volta ao /login (um clique, porque o
+// Spotify já está logado).
+const sessionTTL = 7 * 24 * time.Hour
 
 func main() {
 	// run existe para o main poder devolver um erro e sair com código 1.
@@ -77,9 +83,20 @@ func run() error {
 	top := service.NewTopService(plays)
 	calendar := service.NewCalendarService(plays, cfg.Timezone)
 
+	// --- Sessão: o cookie assinado que libera /api/* depois do login ---
+	// session.New recusa um SESSION_SECRET curto (< 32 bytes): falha já aqui,
+	// na inicialização, e a mensagem não repete o segredo.
+	sessions, err := session.New(cfg.SessionSecret, sessionTTL)
+	if err != nil {
+		return fmt.Errorf("SESSION_SECRET: %w", err)
+	}
+
 	// --- HTTP ---
 	handler := server.New(server.Routes{
-		Auth:       handlers.NewAuthHandler(auth, tokens, cfg.FrontendURL),
+		// O client faz o papel de "quem é o dono deste token?" (UserID) no
+		// /callback; só a conta ALLOWED_SPOTIFY_USER_ID ganha a sessão.
+		Auth:       handlers.NewAuthHandler(auth, client, tokens, sessions, cfg.AllowedSpotifyUserID, cfg.FrontendURL),
+		Sessions:   sessions,
 		NowPlaying: handlers.NowPlaying(nowPlaying),
 		TopWeek:    handlers.TopWeek(top),
 		Calendar:   handlers.Calendar(calendar, cfg.Timezone),

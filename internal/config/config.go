@@ -17,6 +17,9 @@
 //   - func Load() (Config, error): lê o arquivo .env (se existir) e as
 //     variáveis de ambiente; devolve erro claro se faltar SPOTIFY_CLIENT_ID.
 //
+// OBRIGATÓRIAS (o programa não sobe sem elas): SPOTIFY_CLIENT_ID, DB_URL,
+// ALLOWED_SPOTIFY_USER_ID e SESSION_SECRET.
+//
 // DECISÃO: não usar biblioteca para ler .env no começo — são ~15 linhas com
 // bufio.Scanner e dá para entender o que acontece.
 package config
@@ -46,6 +49,13 @@ type Config struct {
 	// DBURL é a string de conexão do PostgreSQL (variável DB_URL). Guarda o
 	// token do Spotify e o histórico de plays. Substituiu o antigo DataDir.
 	DBURL string
+	// AllowedSpotifyUserID é o id da ÚNICA conta Spotify que pode usar a API
+	// (variável ALLOWED_SPOTIFY_USER_ID). O /callback compara com ele o dono do
+	// token: outra conta é recusada e não sobrescreve o token guardado.
+	AllowedSpotifyUserID string
+	// SessionSecret é a chave que assina o cookie de sessão (SESSION_SECRET).
+	// O tamanho mínimo é validado em session.New, que é quem usa a chave.
+	SessionSecret string
 }
 
 func loadDotEnv(path string) error {
@@ -99,6 +109,9 @@ func Load() (Config, error) {
 		FrontendURL:       getEnv("FRONTEND_URL", "http://localhost:3000"),
 		CORSAllowedOrigin: getEnv("CORS_ALLOWED_ORIGIN", "http://localhost:3000"),
 		DBURL:             getEnv("DB_URL", ""),
+
+		AllowedSpotifyUserID: getEnv("ALLOWED_SPOTIFY_USER_ID", ""),
+		SessionSecret:        getEnv("SESSION_SECRET", ""),
 	}
 
 	if cfg.ClientID == "" {
@@ -108,6 +121,17 @@ func Load() (Config, error) {
 	// inicialização, com mensagem clara, é melhor que cair no meio do login.
 	if cfg.DBURL == "" {
 		return Config{}, errors.New("DB_URL is required (see .env.example)")
+	}
+
+	// Sem estas duas a autenticação das rotas não existe: falhar aqui, na
+	// inicialização, é melhor que subir um servidor aberto "por engano". Um
+	// ALLOWED_SPOTIFY_USER_ID vazio, em especial, nunca pode virar "qualquer
+	// um entra".
+	if cfg.AllowedSpotifyUserID == "" {
+		return Config{}, errors.New("ALLOWED_SPOTIFY_USER_ID is required (see .env.example)")
+	}
+	if cfg.SessionSecret == "" {
+		return Config{}, errors.New("SESSION_SECRET is required (see .env.example)")
 	}
 
 	// O .env só tem texto: "20" vira 20 minutos (time.Duration).

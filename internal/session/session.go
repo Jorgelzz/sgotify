@@ -18,9 +18,9 @@
 //	ninguém forja um cookie, nem estica a validade de um cookie verdadeiro
 //	(mudar o número invalida a assinatura).
 //
-// LIMITES CONSCIENTES (documente no README depois):
+// LIMITES CONSCIENTES (documentados no guide-structure.md, seção 13):
 //   - não há como encerrar UMA sessão antes do prazo; a saída é trocar o
-//     SESSION_SECRET (invalida todas). Não criamos rota /logout: o README
+//     SESSION_SECRET (invalida todas). Não criamos rota /logout: o escopo
 //     fixa as rotas do projeto.
 //   - o cookie vai sem a flag Secure, porque o servidor local fala HTTP.
 //     Atrás de HTTPS, ligue.
