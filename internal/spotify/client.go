@@ -114,6 +114,9 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 	if err != nil {
 		return false, err
 	}
+	return c.getWithToken(ctx, token, path, query, out)
+}
+func (c *Client) getWithToken(ctx context.Context, token string, path string, query url.Values, out any) (bool, error) {
 
 	target := c.baseURL + path
 	if len(query) > 0 {
